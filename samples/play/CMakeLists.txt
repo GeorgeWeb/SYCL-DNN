@@ -13,9 +13,24 @@
 # limitations under the License.
 #
 
-include(HandleEigen)
+if(SNN_INSTALL_SAMPLES)
+  set(_install INSTALL)
+else()
+  set(_install)
+endif()
 
-add_subdirectory(play)
-add_subdirectory(conv2d)
-add_subdirectory(pooling)
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
 
+snn_executable(
+  WITH_SYCL
+  TARGET
+    play
+  KERNEL_SOURCES
+    play.cc
+  PRIVATE_LIBRARIES
+    sycl_dnn
+    Eigen::Eigen
+    ${OpenCV_LIBS}
+  ${_install}
+)
