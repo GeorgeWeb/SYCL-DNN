@@ -14,12 +14,15 @@
  * limitations under the License.
  */
 
-// This sample makes use of the Eigen backend, and so we need to include the
-// relevant Eigen header.
-#include <unsupported/Eigen/CXX11/Tensor>
+//#include <algorithm>
+#include <iostream>
+#include <iterator>
+#include <memory>
+#include <numeric>
+#include <string>
+#include <vector>
 
-#include "sycldnn/backend/eigen_backend.h"
-
+#include "sycldnn/backend/snn_backend.h"
 #include "sycldnn/conv2d/conv_type.h"
 #include "sycldnn/conv2d/launch.h"
 #include "sycldnn/conv2d/params.h"
@@ -31,13 +34,7 @@
 #include "sycldnn/pointwise/launch.h"
 #include "sycldnn/pointwise/operators.h"
 #include "sycldnn/status.h"
-
-#include <iostream>
-#include <iterator>
-#include <memory>
-#include <numeric>
-#include <string>
-#include <vector>
+#include "sycldnn/transpose/launch.h"
 
 #include <opencv2/opencv.hpp>
 
@@ -113,12 +110,15 @@ class OpenCVManager {
 
   static void saveImage(std::string const& filename, float* buffer, int height,
                         int width) {
-    ImageType image(height, width, CV_32FC3, buffer);
+    ImageType image(height, width, CV_32FC1, buffer);
+    printf("Created image\n");
     // Make negative values zero.
     cv::threshold(image, image, 0, 0, cv::THRESH_TOZERO);
     cv::normalize(image, image, 0.0, 255.0, cv::NORM_MINMAX);
-    image.convertTo(image, CV_8UC3);
+    image.convertTo(image, CV_8UC1);
+    printf("Converted image\n");
     cv::imwrite(filename.c_str(), image);
+    printf("Saved image\n");
   }
 
   static void displayImage() {
@@ -127,19 +127,20 @@ class OpenCVManager {
 };
 
 // ...
+/*
 template <typename DataType>
 class SNNConvolutionManager {
  public:
-  SNNConvolutionManager(const cl::sycl::device_selector& deviceSelector,
-                        Eigen::SyclDevice& syclDevice)
-      : m_syclQueue(std::unique_ptr<Eigen::QueueInterface>(
-            new Eigen::QueueInterface{deviceSelector})) {
-    // Create the SyclDevice (using the Eigen backend) from the QueueInterface
-    m_syclDevice = Eigen::SyclDevice{m_syclQueue.get()};
+   SNNConvolutionManager(const cl::sycl::device_selector& deviceSelector,
+                         Eigen::SyclDevice& syclDevice)
+       : m_syclQueue(std::unique_ptr<Eigen::QueueInterface>(
+             new Eigen::QueueInterface{deviceSelector})) {
+     // Create the SyclDevice (using the Eigen backend) from the QueueInterface
+     m_syclDevice = Eigen::SyclDevice{m_syclQueue.get()};
 
-    // Construct a SYCL-DNN Eigen backend
-    m_snnBackend = sycldnn::backend::EigenBackend{m_syclDevice};
-  }
+     // Construct a SYCL-DNN Eigen backend
+     m_snnBackend = sycldnn::backend::EigenBackend{m_syclDevice};
+   }
 
   ~SNNConvolutionManager() {
     // ...
@@ -192,6 +193,7 @@ class SNNConvolutionManager {
     }
   }
 };
+*/
 
 namespace filters {
 // sobel filter array (x and y axis)
@@ -208,23 +210,21 @@ int main() {
   auto device_selector = cl::sycl::default_selector{};
 
   // Create related Eigen objects (dispatch queue and associated device))
-  auto queue = std::unique_ptr<Eigen::QueueInterface>(
-      new Eigen::QueueInterface{device_selector});
-  auto device = Eigen::SyclDevice{queue.get()};
+  auto queue = cl::sycl::queue(device_selector);
+  auto device = queue.get_device();
 
   // Construct a SYCL-DNN Eigen backend
-  auto backend = sycldnn::backend::EigenBackend{device};
+  auto backend = sycldnn::backend::SNNBackend{queue};
 
   auto inputFile =
       std::string("/home/georgi/projects/SYCL-DNN/res/tensorflow.png");
-  auto outputFile =
-      std::string("/home/georgi/projects/SYCL-DNN/res/out.png");
+  auto outputFile = std::string("/home/georgi/projects/SYCL-DNN/res/out.png");
   auto image = OpenCVManager::loadImage(inputFile);
 
   // input image read from OpenCV, filter: 3x3.
   sycldnn::conv2d::Conv2DParams convParams{};
   convParams.channels = image.channels();
-  convParams.features = 3;
+  convParams.features = 2;
   convParams.batch = 1;
   convParams.in_rows = image.rows;
   convParams.in_cols = image.cols;
@@ -234,8 +234,8 @@ int main() {
   convParams.stride_cols = 1;
   convParams.out_rows = image.rows;
   convParams.out_cols = image.cols;
-  convParams.pad_rows = 0;
-  convParams.pad_cols = 0;
+  convParams.pad_rows = 1;
+  convParams.pad_cols = 1;
   convParams.dilation_rows = 1;
   convParams.dilation_cols = 1;
 
@@ -248,7 +248,7 @@ int main() {
   // input image read from OpenCV, filter: 3x3.
   sycldnn::conv2d::Conv2DParams conv2Params{};
   conv2Params.channels = image.channels();
-  conv2Params.features = 3;
+  conv2Params.features = 2;
   conv2Params.batch = 1;
   conv2Params.in_rows = image.rows;
   conv2Params.in_cols = image.cols;
@@ -258,8 +258,8 @@ int main() {
   conv2Params.stride_cols = 1;
   conv2Params.out_rows = image.rows;
   conv2Params.out_cols = image.cols;
-  conv2Params.pad_rows = 0;
-  conv2Params.pad_cols = 0;
+  conv2Params.pad_rows = 1;
+  conv2Params.pad_cols = 1;
   conv2Params.dilation_rows = 1;
   conv2Params.dilation_cols = 1;
 
@@ -276,26 +276,23 @@ int main() {
   // Here we calculate the storage requirements for these tensors, and then
   // allocate storage for them via Eigen's GPU device memory allocator.
   const auto inputNBytes = convTensor.sizes.input_size * sizeof(value_type);
-  auto* inputBuffer = static_cast<value_type*>(device.allocate(inputNBytes));
+  auto inputBuffer = backend.allocate<value_type>(inputNBytes);
 
   ///*
   auto intermediateNBytes = convTensor.sizes.output_size * sizeof(value_type);
-  auto* intermediateBuffer =
-      static_cast<value_type*>(device.allocate(intermediateNBytes));
+  auto intermediateBuffer = backend.allocate<value_type>(intermediateNBytes);
   //*/
 
   const auto outputNBytes = conv2Tensor.sizes.input_size * sizeof(value_type);
-  auto* outputBuffer = static_cast<value_type*>(device.allocate(outputNBytes));
+  auto outputBuffer = backend.allocate<value_type>(outputNBytes);
 
   const auto filter1NBytes = convTensor.sizes.filter_size * sizeof(value_type);
-  auto* filter1Buffer =
-      static_cast<value_type*>(device.allocate(filter1NBytes));
+  auto filter1Buffer = backend.allocate<value_type>(filter1NBytes);
 
-  ///*
-  const auto filter2NBytes = conv2Tensor.sizes.filter_size * sizeof(value_type);
-  auto* filter2Buffer =
-      static_cast<value_type*>(device.allocate(filter2NBytes));
-  //*/
+  const auto filter2NBytes = convTensor.sizes.filter_size * sizeof(value_type);
+  auto filter2Buffer = backend.allocate<value_type>(filter2NBytes);
+
+  std::cout << convTensor.sizes.filter_size << std::endl;
 
   // The GPU buffers are initially unpopulated. Here we fill the input and
   // filter tensors. The output tensors are left undefined.
@@ -306,40 +303,85 @@ int main() {
     std::cout << "Input Size:\t" << input.size() << std::endl;
   }
 
-  device.memcpyHostToDevice(inputBuffer, input.data(), inputNBytes);
-  device.memcpyHostToDevice(filter1Buffer, filters::sobelX, filter1NBytes);
-  device.memcpyHostToDevice(filter2Buffer, filters::sobelY, filter2NBytes);
+  // backend.memcpyHostToDevice(inputBuffer, input.data(), inputNBytes);
+  queue.submit([&](cl::sycl::handler& cgh) {
+    auto inputAcc =
+        inputBuffer.get_buffer()
+            .template get_access<cl::sycl::access::mode::read_write>(cgh);
+    cgh.copy(input.data(), inputAcc);
+  });
+
+  std::vector<value_type> filterVec(filter1NBytes);
+  // copy to filter vec
+  for (int i = 0; i < 3; ++i) {
+    std::copy(std::begin(filters::sobelX), std::begin(filters::sobelX) + 9,
+              filterVec.begin() + 18 * i);
+    std::copy(std::begin(filters::sobelY), std::begin(filters::sobelY) + 9,
+              filterVec.begin() + 9 + 18 * i);
+  }
+  // copy to device
+  queue.submit([&](cl::sycl::handler& cgh) {
+    auto filterVecAcc =
+        filter1Buffer.get_buffer()
+            .template get_access<cl::sycl::access::mode::read_write>(cgh);
+    cgh.copy(filterVec.data(), filterVecAcc);
+  });
 
   int res = 0;
+  std::vector<int> dimensions{{3, 2, 3, 3}};
+  std::vector<int> permutations{{3, 4, 1, 2}};
+  auto status = sycldnn::transpose::launch<value_type>(
+      filter1Buffer, filter2Buffer, dimensions, permutations, backend);
 
-  // Now that all of our buffers are populated, and parameters configured, we
-  // can execute the convolution itself. This happens asynchronously, so we
-  // follow the launch of the convolution kernel with a blocking wait.
+  // Now that all of our buffers are populated, and parameters configured,
+  // we can execute the convolution itself. This happens asynchronously, so
+  // we follow the launch of the convolution kernel with a blocking wait.
   auto algoSelctor = sycldnn::conv2d::DirectSelector{};
-  auto status =
+  status =
       sycldnn::conv2d::launch<value_type, sycldnn::conv2d::conv_type::Forward>(
-          inputBuffer, filter1Buffer, intermediateBuffer, convTensor.params,
+          inputBuffer, filter2Buffer, intermediateBuffer, convTensor.params,
           algoSelctor, backend);
   if (sycldnn::StatusCode::OK != status.status) {
     // If the launch failed, then clean up our GPU buffers and return failure.
-    device.deallocate(inputBuffer);
-    device.deallocate(outputBuffer);
-    device.deallocate(filter1Buffer);
-    device.deallocate(filter2Buffer);
+    backend.deallocate(inputBuffer);
+    backend.deallocate(outputBuffer);
+    backend.deallocate(filter1Buffer);
     std::cout << "messed up on first pass\n";
     return res = -1;
   }
 
-  std::vector<value_type> intermediate;
-  intermediate.resize(convTensor.sizes.output_size);
+  // ...
+  {
+    std::vector<int> dimensions{{image.rows, image.cols, 2}};
+    std::vector<int> permutations{{3, 1, 2}};
+    auto status = sycldnn::transpose::launch<value_type>(
+        intermediateBuffer, outputBuffer, dimensions, permutations, backend);
+  }
+
+  // The convolutions are now executing. While they run, we can allocate a
+  // host-accessible vector, then wait for completion and trigger a copy via
+  // Eigen to return the results to system memory.
+  std::vector<value_type> output;
+  output.resize(image.rows * image.cols);
+
   // Wait for completion, then copy results to system memory.
   status.event.wait_and_throw();
-  device.memcpyDeviceToHost(intermediate.data(), intermediateBuffer,
-                            intermediateNBytes);
-  OpenCVManager::saveImage(
-      "/home/georgi/projects/SYCL-DNN/res/intermediate.png",
-      intermediate.data(), image.rows, image.cols);
+  queue.submit([&](cl::sycl::handler& cgh) {
+    auto outputAcc =
+        outputBuffer.get_buffer()
+            .template get_access<cl::sycl::access::mode::read_write>(cgh);
+    cgh.copy(outputAcc, output.data());
+  });
 
+  OpenCVManager::saveImage("/home/georgi/projects/SYCL-DNN/res/out.png",
+                           output.data(), image.rows, image.cols);
+                           /*
+  OpenCVManager::saveImage("/home/georgi/projects/SYCL-DNN/res/out2.png",
+                           output.data() + image.rows * image.cols, image.rows,
+                           image.cols);
+                           */
+
+  /*
   algoSelctor = sycldnn::conv2d::DirectSelector{};
   status =
       sycldnn::conv2d::launch<value_type, sycldnn::conv2d::conv_type::Forward>(
@@ -350,11 +392,9 @@ int main() {
     device.deallocate(inputBuffer);
     device.deallocate(outputBuffer);
     device.deallocate(filter1Buffer);
-    device.deallocate(filter2Buffer);
     std::cout << "messed up on second pass\n";
     return res = -1;
   }
-  ///*
   // Activation (tanh)
   status = sycldnn::pointwise::launch<value_type, sycldnn::pointwise::Tanh,
                                       sycldnn::pointwise::Forward>(
@@ -365,32 +405,18 @@ int main() {
     device.deallocate(inputBuffer);
     device.deallocate(outputBuffer);
     device.deallocate(filter1Buffer);
-    device.deallocate(filter2Buffer);
     std::cout << "messed up on activation pass\n";
     return res = -1;
   }
-  //*/
-
-  // The convolutions are now executing. While they run, we can allocate a
-  // host-accessible vector, then wait for completion and trigger a copy via
-  // Eigen to return the results to system memory.
-  std::vector<value_type> output;
-  output.resize(conv2Tensor.sizes.output_size);
-
-  // Wait for completion, then copy results to system memory.
-  status.event.wait_and_throw();
-  device.memcpyDeviceToHost(output.data(), outputBuffer, outputNBytes);
+  */
 
   // The convolution results are now available in host-accessible system memory.
 
   // We can now deallocate the Eigen GPU buffers.
-  device.deallocate(inputBuffer);
-  device.deallocate(outputBuffer);
-  device.deallocate(filter1Buffer);
-  device.deallocate(filter2Buffer);
+  backend.deallocate(inputBuffer);
+  backend.deallocate(outputBuffer);
+  backend.deallocate(filter1Buffer);
 
   std::cout << "Success" << std::endl;
-
-  OpenCVManager::saveImage(outputFile, output.data(), image.rows, image.cols);
   return res;
 }
